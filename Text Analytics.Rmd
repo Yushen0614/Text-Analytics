@@ -1,0 +1,603 @@
+---
+title: "2224040 Individual Assignment"
+output: html_document
+date: "2023-05-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading Packages
+```{r message=FALSE, warning=FALSE}
+# install.packages("jsonlite")
+library(jsonlite)
+library(dplyr)
+library(tidytext)
+library(tidyverse)
+library(qdapRegex)
+library(qdap)
+library(tokenizers)
+library(ggplot2)
+library(ggrepel)
+library(sentimentr)
+library(patchwork)
+library(textstem)
+library(tm)
+library(lexicon)
+library(hunspell)
+library(word2vec)
+library(textdata)
+library(topicmodels)
+library(wordcloud)
+```
+
+# Data Loading
+```{r message=FALSE, warning=FALSE}
+# Read the data
+data <- file("Office_Products_5.json") %>% jsonlite::stream_in()
+
+# 
+head(data)
+```
+
+# Data Cleaning and Preprocessing
+```{r}
+# Replace emoticons and internet slang
+data$reviewText1 <- replace_emoticon(data$reviewText)
+# data$reviewText1 <- replace_internet_slang(data$reviewText)
+
+# Replace all html tags and non-alphanumeric characters
+data$reviewText1 <- str_remove_all(data$reviewText, "<.*?>") %>%
+  str_replace_all("[^[:alnum:][:punct:]]", " ") %>%
+   str_replace_all("\\s{2,}", " ")
+
+# Remove all special characters using regex
+data$reviewText1 <- data$reviewText %>%
+gsub("[^[:alpha:][:space:]]", " ",.)
+
+# remove extra spaces
+data$reviewText1 <- str_squish(data$reviewText)
+
+# lowercase
+data$reviewText1 <- tolower(data$reviewText)
+```
+
+```{r}
+# Define a regular expression pattern to match hyphenated words
+hyphen_pattern <- "[[:alnum:]]+(?:[-'][[:alnum:]]+)*"
+
+# Define a custom tokenization function using the hyphen_pattern
+custom_tokenize <- function(x) {
+  str_extract_all(x, hyphen_pattern)
+}
+
+y = data %>%
+    unnest_tokens(reviewText1, output = word_token, token = custom_tokenize)
+
+# Create a bar plot of the most common word tokens
+y %>% 
+  group_by(word_token) %>% 
+  count() %>% 
+  arrange(desc(n)) %>% 
+  head(15) %>% 
+  ggplot(.,aes(y=reorder(word_token, n), x = n)) + geom_bar(stat = 'identity')
+
+```
+
+```{r}
+# Remove stop words from the tokenized text
+y1 <- anti_join(y, stop_words, by = c("word_token" = "word"))
+
+# Examine the most common words before and after
+p1 <- y %>% 
+  group_by(word_token) %>% 
+  count() %>% 
+  arrange(desc(n)) %>% 
+  head(20) %>% 
+  ggplot(.,aes(y=reorder(word_token,n),x=n))+geom_bar(stat='identity')
+
+p2 <- y1 %>% 
+  group_by(as.factor(overall), word_token) %>% 
+  count() %>% 
+  arrange(desc(n)) %>% 
+  head(20) %>%
+  ggplot(.,aes(y=reorder(word_token,n),x=n)) + 
+  geom_bar(stat='identity')
+
+p1+p2
+```
+
+
+```{r}
+# Filter stop words for each source
+# smart_words <- stop_words %>% filter(lexicon == "SMART")
+# snowball_words <- stop_words %>% filter(lexicon == "snowball")
+# onix_words <- stop_words %>% filter(lexicon == "onix")
+
+# Find common words among the three sources
+# common_words <- smart_words %>%
+#   inner_join(snowball_words, by = "word") %>%
+#   inner_join(onix_words, by = "word")
+```
+
+```{r}
+# y1 %>% 
+#   filter(str_detect(word_token, "^play")) %>% 
+#   count(word_token, sort = T)
+```
+
+```{r}
+# Normalize words to a root based on language structure
+y1 <- y1 %>%
+  mutate(word_lemma = lemmatize_words(word_token)) %>%
+  unnest(word_lemma) 
+# %>%
+#   count(word_lemma, sort = TRUE)
+```
+
+# Bag-of-words analysis
+```{r}
+# Extract the top words for each star rating category
+top_words <- y1 %>%
+  group_by(overall, word_lemma) %>%
+  count() %>%
+  arrange(overall, desc(n)) %>%
+  group_by(overall) %>%
+  top_n(10) %>%
+  ungroup()
+
+# Plot the top words for each star rating category
+top_words %>%
+  mutate(word_lemma = factor(word_lemma, levels = unique(word_lemma))) %>%
+  ggplot(aes(x = word_lemma, y = n, fill = as.factor(overall))) +
+  geom_col() +
+  labs(title = "Top Words by Star Rating",
+       x = "Word",
+       y = "Count",
+       fill = "Star Rating") +
+  scale_fill_discrete(name = "Star Rating") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~ overall, nrow = 1, scales = "free_x")
+
+
+```
+
+```{r}
+# Group at the document level and count the number of occurrences of each each word in each document
+y_counts <- y1 %>% 
+  count(reviewerID, overall, word_token, sort = TRUE) %>% 
+  ungroup() %>% 
+  rename(count=n)
+
+head(y_counts)
+
+# Compute tf, idf, and tf-idf values for each word in each document
+y_tfidf <- y_counts %>%
+  bind_tf_idf(word_token, reviewerID, count)
+```
+
+```{r}
+y_tfidf_grouped <- y_tfidf %>%
+  group_by(reviewerID) %>%
+  # Arrange the rows within each group by decreasing tf_idf values
+  arrange(desc(tf_idf)) %>%
+  # Select the top 5 rows within each group
+  slice_head(n = 5) %>%
+  # Unnest the word_token column
+  unnest(word_token) %>%
+  # Create a row number variable within each group
+  group_by(reviewerID) %>%
+  mutate(row_num = row_number()) %>%
+  # Spread the top 5 words into separate columns, with row_num as the ID variable
+  pivot_wider(id_cols = reviewerID, names_from = row_num, values_from = word_token, names_prefix = "word_")
+
+# Select only the num and word columns
+top_5_words <- y_tfidf_grouped %>%
+  select(reviewerID, starts_with("word_"))
+
+# Rename the columns to remove the "word_" prefix
+colnames(top_5_words) <- paste0("top_", 0:5)
+colnames(top_5_words)[1] <- "num"
+
+# Print the resulting dataframe
+head(top_5_words)
+```
+
+```{r}
+y_dtm_counts <- y_tfidf %>% 
+  cast_dtm(reviewerID, word_token, count)
+as.matrix((y_dtm_counts[1:6, 1:6]))
+
+y_dtm_tfidf <- y_tfidf %>% 
+  cast_dtm(reviewerID, word_token, tf_idf)
+as.matrix((y_dtm_tfidf[1:6,1:6]))
+
+y_dtm_counts_sparse <- removeSparseTerms(y_dtm_counts, 0.86)
+y_dtm_tfidf_sparse <- removeSparseTerms(y_dtm_tfidf, 0.86)
+```
+
+# Sentiment Analysis
+## Bing Liu Dictionary
+```{r}
+bing_dictionary <- get_sentiments("bing")
+
+y2 <- left_join(y1, bing_dictionary, by = c("word_token" = "word"))
+y2 <- y2 %>% 
+  rename("bing_sentiment" = "sentiment")
+```
+
+```{r}
+# Use mutate to replace the values in bing_sentiment
+y2 <- mutate(y2, bing_sentiment = case_when(is.na(bing_sentiment) ~ 0, 
+                                            bing_sentiment == "positive" ~ 1,
+                                            bing_sentiment == "negative" ~ -1))
+```
+
+```{r}
+# Compute the overall sentiment for each message by summing the sentiment scores
+y2_msg <- y2 %>%
+  group_by(overall, reviewText) %>%
+  summarise(bing = sum(bing_sentiment))
+
+y2_msg %>%
+  group_by(overall) %>%
+  summarise(bing = mean(bing))
+```
+
+## Afinn Dictionary
+```{r}
+# Continue exploring sentiment dictionaries and perform sentiment analysis on text data using the Afinn dictionary
+afinn_dictionary <- tidytext::get_sentiments("afinn")
+
+y3 <- left_join(y1, afinn_dictionary, by = c("word_token"="word"))
+y3 <- y3 %>% 
+  rename("afinn_sentiment" = "value")
+```
+
+```{r}
+# Use mutate to replace the values in afinn_sentiment
+y3$afinn_sentiment <-  replace_na(y3$afinn_sentiment, 0)
+```
+
+```{r}
+# Group the data by each message and compute the overall sentiment for each message
+y3_msg <- y3 %>%
+  group_by(overall, reviewText) %>%
+  summarise(afinn = sum(afinn_sentiment))
+
+y3_msg %>%
+  group_by(overall) %>%
+  summarise(afinn = mean(afinn))
+
+```
+
+```{r}
+d_sentiments <- sentiment_by(get_sentences(data$reviewText1))
+
+data$sentiment = d_sentiments$ave_sentiment
+# View the positive and negative sentiments
+highlight(sentiment_by(get_sentences(data$reviewText1)))
+
+plot(density(data$sentiment))
+```
+
+```{r}
+# Examine possible correlations
+# cor(data$backers_count, data$sentiment)
+
+ggplot(data, aes(x = as.factor(overall), y = sentiment)) + 
+  geom_boxplot() +
+  labs(title = "Sentiment Analysis by Overall Rating",
+       x = "Overall Rating",
+       y = "Sentiment")
+```
+
+# Topic Modeling
+## All Customers
+```{r}
+# Group at the document level and count the number of occurrences of each each word in each document
+y_counts <- y1 %>%
+  count(reviewerID, overall, word_token, sort = TRUE) %>% 
+  ungroup() %>% 
+  rename(count=n)
+
+head(y_counts)
+
+# Compute tf, idf, and tf-idf values for each word in each document
+y_tfidf <- y_counts %>%
+  bind_tf_idf(word_token, reviewerID, count)
+```
+
+```{r}
+# Create a document-term matrix (DTM)
+y_dtm_counts <- y_tfidf %>% 
+  cast_dtm(reviewerID, word_token, count)
+as.matrix((y_dtm_counts[1:6, 1:6]))
+
+y_dtm_tfidf <- y_tfidf %>% 
+  cast_dtm(reviewerID, word_token, tf_idf)
+as.matrix((y_dtm_tfidf[1:6,1:6]))
+
+# Remove terms that have low frequency across documents
+y_dtm_counts_sparse <- removeSparseTerms(y_dtm_counts, 0.86)
+y_dtm_tfidf_sparse <- removeSparseTerms(y_dtm_tfidf, 0.86)
+
+topic_model <- LDA(y_dtm_counts_sparse, k = 3, method = "Gibbs")
+```
+
+```{r}
+# Examine the topics using the tidy function from the tidytext package
+topics <- tidy(topic_model, matrix = "beta")
+```
+
+```{r}
+# Get the top 15 terms for each topic
+top_terms <- topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>%
+  ungroup() %>%
+  arrange(topic, desc(beta))
+```
+
+
+## Satisfied
+```{r}
+# Group at the document level and count the number of occurrences of each each word in each document where the review is equal to or greater than 4
+y_counts_sat <- y1 %>% 
+  filter(overall == 4 | overall == 5) %>%
+  count(reviewerID, overall, word_token, sort = TRUE) %>% 
+  ungroup() %>% 
+  rename(count=n)
+
+head(y_counts_sat)
+
+# Compute tf, idf, and tf-idf values for each word in each document
+y_tfidf_sat <- y_counts_sat %>%
+  bind_tf_idf(word_token, reviewerID, count)
+```
+
+```{r}
+# Create a document-term matrix (DTM)
+y_dtm_counts_sat <- y_tfidf_sat %>% 
+  cast_dtm(reviewerID, word_token, count)
+as.matrix((y_dtm_counts_sat[1:6, 1:6]))
+
+y_dtm_tfidf_sat <- y_tfidf_sat %>% 
+  cast_dtm(reviewerID, word_token, tf_idf)
+as.matrix((y_dtm_tfidf_sat[1:6,1:6]))
+
+# Remove terms that have low frequency across documents
+y_dtm_counts_sparse_sat <- removeSparseTerms(y_dtm_counts_sat, 0.86)
+y_dtm_tfidf_sparse_sat <- removeSparseTerms(y_dtm_tfidf_sat, 0.86)
+```
+
+```{r}
+# Use LDA to identify topics in the text. We will set the number of topics (k) to 3 for now
+topic_model_sat <- LDA(y_dtm_counts_sparse_sat, k = 3, method = "Gibbs")
+```
+
+```{r}
+# Examine the topics using the tidy function from the tidytext package
+topics_sat <- tidy(topic_model_sat, matrix = "beta")
+```
+
+```{r}
+# Get the top 15 terms for each topic
+top_terms_sat <- topics_sat %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>%
+  ungroup() %>%
+  arrange(topic, desc(beta))
+```
+
+```{r}
+# Plot the top terms for each topic (3 topics)
+top_terms_sat %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered() +
+  labs(title = "Topic Analysis of Satisfied Reviews: Top Terms by Topic (3 Topics)")
+```
+
+```{r}
+# Plot the top terms for each topic (4 topics)
+my_topic_model2_sat <- LDA(y_dtm_counts_sparse_sat, k = 4, method = "Gibbs") %>%
+  tidy(matrix = "beta")
+
+word_probs2_sat <- my_topic_model2_sat %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>%
+  ungroup() %>%
+  mutate(term2 = fct_reorder(term, beta))
+
+ggplot(word_probs2_sat, aes(term2, beta, fill = as.factor(topic))) +
+   geom_col(show.legend = FALSE) +
+   facet_wrap(~ topic, scales = "free") +
+   coord_flip() + 
+  labs(title = "Topic Analysis of Satisfied Reviews: Top Terms by Topic (4 Topics)")
+```
+## Dissatisfied
+```{r}
+# Group at the document level and count the number of occurrences of each each word in each document where the review is equal to 1 or 2
+y_counts_dissat <- y1 %>% 
+  filter(overall == 1 | overall == 2) %>%
+  count(reviewerID, overall, word_token, sort = TRUE) %>% 
+  ungroup() %>% 
+  rename(count=n)
+
+head(y_counts_dissat)
+
+# Compute tf, idf, and tf-idf values for each word in each document
+y_tfidf_dissat <- y_counts_dissat %>%
+  bind_tf_idf(word_token, reviewerID, count)
+```
+
+```{r}
+y_dtm_counts_dissat <- y_tfidf_dissat %>% 
+  cast_dtm(reviewerID, word_token, count)
+as.matrix((y_dtm_counts_dissat[1:6, 1:6]))
+
+y_dtm_tfidf_dissat <- y_tfidf_dissat %>% 
+  cast_dtm(reviewerID, word_token, tf_idf)
+as.matrix((y_dtm_tfidf_dissat[1:6,1:6]))
+
+y_dtm_counts_sparse_dissat <- removeSparseTerms(y_dtm_counts_dissat, 0.86)
+y_dtm_tfidf_sparse_dissat <- removeSparseTerms(y_dtm_tfidf_dissat, 0.86)
+```
+
+```{r}
+check_nonzero_row <- function(matrix) {
+  non_zero_rows <- apply(matrix, 1, function(row) any(row != 0))
+  return(non_zero_rows)
+}
+
+non_zero_rows <- check_nonzero_row(y_dtm_counts_sparse_dissat)
+y_dtm_counts_sparse_dissat <- y_dtm_counts_sparse_dissat[non_zero_rows, ]
+```
+
+```{r}
+# Use LDA to identify topics in the text. We will set the number of topics (k) to 3 for now
+topic_model_dissat <- LDA(y_dtm_counts_sparse_dissat, k = 3, method = "Gibbs")
+```
+
+```{r}
+# Examine the topics using the tidy function from the tidytext package
+topics_dissat <- tidy(topic_model_dissat, matrix = "beta")
+```
+
+```{r}
+# Get the top 15 terms for each topic
+top_terms_dissat <- topics_dissat %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>%
+  ungroup() %>%
+  arrange(topic, desc(beta))
+```
+
+```{r}
+# Plot the top terms for each topic (3 topics)
+top_terms_dissat %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered() +
+  labs(title = "Topic Analysis of Dissatisfied Reviews: Top Terms by Topic (3 Topics)")
+```
+
+```{r}
+# Use LDA to identify topics in the text. We will set the number of topics (k) to 4 for now
+topic_model_dissat2 <- LDA(y_dtm_counts_sparse_dissat, k = 4, method = "Gibbs")
+
+# Examine the topics using the tidy function from the tidytext package
+topics_dissat2 <- tidy(topic_model_dissat2, matrix = "beta")
+
+# Get the top 15 terms for each topic
+top_terms_dissat2 <- topics_dissat2 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>%
+  ungroup() %>%
+  arrange(topic, desc(beta))
+
+# Plot the top terms for each topic (4 topics)
+top_terms_dissat2 %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered() +
+  labs(title = "Topic Analysis of Dissatisfied Reviews: Top Terms by Topic (4 Topics)")
+```
+
+
+```{r warning=FALSE}
+# Create a wordcloud
+terms <- terms(topic_model, 8)
+wordcloud(terms, scale = c(5, 0.3), min.freq = 1, colors = "#156FA2")
+
+terms_sat <- terms(topic_model_sat, 8)
+wordcloud(terms_sat, scale = c(3, 0.5), min.freq = 1, ,colors = "#048B8B")
+
+terms_dissat <- terms(topic_model_dissat, 8)
+wordcloud(terms_dissat, scale = c(3, 0.5), min.freq = 1,colors = "#ACDB80")
+```
+
+```{r}
+# Calculate perplexity
+perplexity(topic_model, y_dtm_counts_sparse)
+
+set.seed(12345)
+topics <- c(2:7)
+perplexity_df <- data.frame(perp_value = numeric())
+
+for (i in topics){
+  fitted <- LDA(y_dtm_counts_sparse, k = i, method = "Gibbs")
+  perplexity_df[i,1] <- perplexity(topic_model, y_dtm_counts_sparse)
+}
+```
+
+```{r}
+# Plot the result
+g <- ggplot(data = perplexity_df, aes(x = as.numeric(row.names(perplexity_df)))) +
+  labs(y="Perplexity",x="Number of topics") + 
+  ggtitle("Perplexity")
+
+g <- g + geom_line(aes(y = perp_value), colour = "#476C9B")
+g
+```
+
+```{r}
+topic <- posterior(topic_model)$topics
+colnames(topic) <- apply(terms, 2, paste, collapse = ",")
+head(topic)
+```
+
+```{r}
+# Name the topics
+t1 <- top_terms_sat$term[1:15]
+t1
+
+t2 <- top_terms_sat$term[16:30]
+t2
+
+t3 <- top_terms_sat$term[31:45]
+t3
+
+t4 <- word_probs2_sat$term[1:15]
+t4
+
+t5 <- word_probs2_sat$term[16:30]
+t5
+
+t6 <- word_probs2_sat$term[31:45]
+t6
+
+t7 <- word_probs2_sat$term[46:60]
+t7
+
+t8 <- top_terms_dissat$term[1:15]
+t8
+
+t9 <- top_terms_dissat$term[16:46]
+t9
+
+t10 <- top_terms_dissat$term[47:61]
+t10
+
+t11 <- top_terms_dissat2$term[1:15]
+t11
+
+t12 <- top_terms_dissat2$term[16:35]
+t12
+
+t13 <- top_terms_dissat2$term[36:66]
+t13
+
+t14 <- top_terms_dissat2$term[67:82]
+t14
+```
+
